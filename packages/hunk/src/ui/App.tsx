@@ -328,6 +328,7 @@ export function App({
     activeTheme,
     baseTheme,
     themeId,
+    themeSelection,
     themeSelectorItems,
     themeSelectorOpen,
     themeSelectorSelectedIndex,
@@ -345,7 +346,7 @@ export function App({
   const currentViewPreferences = useMemo<PersistedViewPreferences>(
     () => ({
       mode: layoutMode,
-      theme: themeId,
+      theme: themeSelection,
       showLineNumbers,
       wrapLines,
       showHunkHeaders,
@@ -362,7 +363,7 @@ export function App({
       showHunkHeaders,
       showLineNumbers,
       showMenuBar,
-      themeId,
+      themeSelection,
       wrapLines,
     ],
   );
@@ -462,7 +463,7 @@ export function App({
     currentPreferences: currentViewPreferences,
     initialPreferences: {
       ...currentViewPreferences,
-      theme: activeThemeController.initialThemeId,
+      theme: activeThemeController.initialThemeSelection,
     },
     configPath: bootstrap.viewPreferencesConfigPath,
     pagerMode,
