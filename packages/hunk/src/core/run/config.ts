@@ -285,10 +285,8 @@ function upsertTopLevelTomlValue(
   const lines = source.length > 0 ? source.split("\n") : [];
   const serialized = serializeTomlPreferenceValue(value);
   const assignment = `${key} = ${serialized}`;
-  let firstTableIndex = lines.findIndex((line) => /^\s*\[/.test(line));
-  if (firstTableIndex < 0) {
-    firstTableIndex = lines.length;
-  }
+  const tableIndex = lines.findIndex((line) => /^\s*\[/.test(line));
+  const firstTableIndex = tableIndex < 0 ? lines.length : tableIndex;
 
   const keyPattern = tomlKeyPattern(key);
   const matches: number[] = [];
@@ -308,8 +306,10 @@ function upsertTopLevelTomlValue(
   }
 
   let insertAt = firstTableIndex;
-  while (insertAt > 0 && (lines[insertAt - 1] ?? "").trim().startsWith("#")) {
-    insertAt -= 1;
+  if (tableIndex >= 0) {
+    while (insertAt > 0 && (lines[insertAt - 1] ?? "").trim().startsWith("#")) {
+      insertAt -= 1;
+    }
   }
   const hasTableSpacer = insertAt > 0 && lines[insertAt - 1] === "";
   if (hasTableSpacer) {
@@ -341,6 +341,21 @@ function findThemeTableRange(lines: readonly string[]) {
   }
 
   return { headerIndex, end };
+}
+
+function collapseBlankSeam(lines: string[], index: number) {
+  let start = index;
+  while (start > 0 && (lines[start - 1] ?? "").trim().length === 0) {
+    start -= 1;
+  }
+
+  let end = index;
+  while (end < lines.length && (lines[end] ?? "").trim().length === 0) {
+    end += 1;
+  }
+
+  const separators = start > 0 && end < lines.length ? [""] : [];
+  lines.splice(start, end - start, ...separators);
 }
 
 function applyThemeTableKey(
@@ -405,6 +420,7 @@ function upsertThemeTomlValue(source: string, value: ThemeSelection | undefined)
   }
 
   lines.splice(range.headerIndex, range.end - range.headerIndex);
+  collapseBlankSeam(lines, range.headerIndex);
   const remaining = lines.join("\n").replace(/^\n+/, "").replace(/\n*$/, "");
   return upsertTopLevelTomlValue(remaining.length > 0 ? `${remaining}\n` : "", "theme", value);
 }
