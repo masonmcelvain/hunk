@@ -7,9 +7,17 @@ import { prepareStartupPlan } from "./app/startup";
 import { sanitizeTerminalLine, sanitizeTerminalText } from "./lib/terminalText";
 import { serveSessionBrokerDaemon } from "./session/broker/brokerServer";
 import { runSessionCommand } from "./session/agent/commands";
+import { createInteractiveRunnerLoader } from "./ui/interactiveRunnerLoader";
 
 async function main() {
-  const startupPlan = await prepareStartupPlan();
+  // OpenTUI stays behind dynamic imports so headless commands never materialize its embedded
+  // native library, but its module evaluation is the largest single cost before the first
+  // frame. Startup announces an interactive surface as soon as it is certain, and the loader
+  // starts that import right away so it can overlap whatever bootstrap I/O waits follow.
+  const interactiveRunners = createInteractiveRunnerLoader();
+  const startupPlan = await prepareStartupPlan(process.argv, {
+    onInteractiveSurfaceCommitted: interactiveRunners.begin,
+  });
 
   if (startupPlan.kind === "help") {
     writeStdout(startupPlan.text);
@@ -95,7 +103,7 @@ async function main() {
   }
 
   if (startupPlan.kind === "history-interactive") {
-    const { runInteractiveHistory } = await import("./ui/history/runInteractiveHistory");
+    const { runInteractiveHistory } = await interactiveRunners.loadHistoryRunner();
     await runInteractiveHistory(startupPlan.bootstrap);
     return;
   }
@@ -153,10 +161,9 @@ async function main() {
     throw new Error("Unreachable startup plan.");
   }
 
-  // OpenTUI stays behind the interactive plan so headless commands never materialize its embedded
-  // native library. The shared interactive runner owns the highlighting worker and terminal until
-  // the mounted surface acknowledges graceful shutdown.
-  const { runInteractiveApp } = await import("./ui/runInteractiveApp");
+  // The shared interactive runner owns the highlighting worker and terminal until the mounted
+  // surface acknowledges graceful shutdown.
+  const { runInteractiveApp } = await interactiveRunners.loadReviewRunner();
   await runInteractiveApp(startupPlan);
 }
 

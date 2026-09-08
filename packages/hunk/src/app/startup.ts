@@ -120,6 +120,9 @@ function isCapturedPagerHost(env: NodeJS.ProcessEnv) {
   );
 }
 
+/** Interactive surface a startup plan has committed to before its bootstrap finishes. */
+export type InteractiveStartupSurface = "review" | "history";
+
 export interface StartupDeps {
   parseCliImpl?: (argv: string[]) => Promise<ParsedCliInput>;
   readStdinText?: () => Promise<string>;
@@ -149,6 +152,13 @@ export interface StartupDeps {
   signal?: AbortSignal;
   /** Borrow the owning history session's already-loaded extension authority. */
   borrowedExtensionLoad?: import("../extensions/types").ExtensionLoadResult;
+  /**
+   * Called once startup knows the plan will mount an interactive surface, before the provider,
+   * extension, and changeset work that still has to finish. The caller may begin loading that
+   * surface's renderer so its module evaluation overlaps the remaining bootstrap I/O. Only
+   * failures can still turn the plan headless after this fires.
+   */
+  onInteractiveSurfaceCommitted?: (surface: InteractiveStartupSurface) => void;
 }
 
 /** Carry the invocation's authoritative extension paths into a delegated review input. */
@@ -417,6 +427,14 @@ export async function prepareStartupPlan(
   }
 
   if (parsedCliInput.kind === "history") {
+    const useInteractiveHistory = shouldUseInteractiveHistory({
+      forceStatic: parsedCliInput.static,
+      stdinIsTTY,
+      stdoutIsTTY,
+    });
+    if (useInteractiveHistory) {
+      deps.onInteractiveSurfaceCommitted?.("history");
+    }
     const baseVcsCatalog = await loadBaseVcsCatalog();
     const { loadHistoryBootstrap } = await import("./historyBootstrap");
     const bootstrap = await loadHistoryBootstrap({
@@ -429,11 +447,6 @@ export async function prepareStartupPlan(
     // The runner owns source/extension retirement; unlike ordinary headless plans, history must
     // retain its provider cursor until every page has been consumed.
     preloadedExtensions = undefined;
-    const useInteractiveHistory = shouldUseInteractiveHistory({
-      forceStatic: parsedCliInput.static,
-      stdinIsTTY,
-      stdoutIsTTY,
-    });
     return {
       kind: useInteractiveHistory ? "history-interactive" : "history-static",
       bootstrap,
@@ -523,11 +536,18 @@ export async function prepareStartupPlan(
     };
   }
 
+  // Past this point the plan always builds a changeset, and a terminal on stdout means it mounts
+  // the review surface once that changeset exists. Announce that now so the caller can start
+  // loading the renderer ahead of the VCS and extension bootstrap below.
+  if (stdoutIsTTY) {
+    deps.onInteractiveSurfaceCommitted?.("review");
+  }
+
   const runtimeCliInput = await whileStartupOwnsExtensions(() =>
     resolveRuntimeCliInputImpl(parsedCliInput),
   );
-  // Past this point the plan always builds a changeset, so the catalog and the loading pipeline
-  // are needed for certain; resolve them together rather than at each use.
+  // The catalog and the loading pipeline are needed for certain; resolve them together rather
+  // than at each use.
   const baseVcsCatalog = await loadBaseVcsCatalog();
   let configured = await whileStartupOwnsExtensions(() =>
     resolveConfiguredCliInputImpl(runtimeCliInput, {

@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createEmptyExtensionLoadResult } from "../extensions/types";
 import { resolveExtensionCliCommands } from "../extensions/cliCommands";
 import type { HunkConfigResolution } from "../core/run/config";
@@ -25,6 +29,24 @@ function createTestConfigResolution(
     keybindings: {},
     ...overrides,
   };
+}
+
+/** Create a throwaway Git repository with one commit for history planning tests. */
+function createTestGitRepo() {
+  const cwd = mkdtempSync(join(tmpdir(), "hunk-startup-history-"));
+  const git = (...args: string[]) => {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    if (result.status !== 0) {
+      throw new Error(result.stderr || `git ${args.join(" ")} failed`);
+    }
+  };
+  git("init", "-q");
+  git("config", "user.email", "test@example.com");
+  git("config", "user.name", "Test");
+  writeFileSync(join(cwd, "a.txt"), "one\n");
+  git("add", "a.txt");
+  git("commit", "-q", "-m", "initial");
+  return cwd;
 }
 
 function createBootstrap(input: CliInput): AppBootstrap {
@@ -968,6 +990,167 @@ describe("startup planning", () => {
       'Skipped theme "ocean" from extension pack • config already defines it',
       'Skipped theme "Bad Id" from extension pack • theme ids must be lowercase words separated by - or _',
     ]);
+  });
+
+  test("announces the review surface before extensions and the changeset load", async () => {
+    const cliInput: CliInput = { kind: "vcs", staged: false, options: {} };
+    const order: string[] = [];
+
+    const plan = await prepareStartupPlan(["bun", "hunk", "diff"], {
+      parseCliImpl: async () => cliInput as ParsedCliInput,
+      resolveRuntimeCliInputImpl: (input) => {
+        order.push("runtime-input");
+        return input;
+      },
+      resolveConfiguredCliInputImpl: (input) => createTestConfigResolution(input),
+      loadStartupExtensionsImpl: async () => {
+        order.push("extensions");
+        return createEmptyExtensionLoadResult();
+      },
+      loadAppBootstrapImpl: async (input) => {
+        order.push("changeset");
+        return createBootstrap(input);
+      },
+      usesPipedPatchInputImpl: () => false,
+      stdoutIsTTY: true,
+      onInteractiveSurfaceCommitted: (surface) => {
+        order.push(`surface:${surface}`);
+      },
+    });
+
+    expect(plan.kind).toBe("app");
+    expect(order).toEqual(["surface:review", "runtime-input", "extensions", "changeset"]);
+  });
+
+  test("announces the review surface for pager stdin once a controlling terminal opens", async () => {
+    const patchText = "diff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
+    const surfaces: string[] = [];
+
+    const plan = await prepareStartupPlan(["bun", "hunk", "pager"], {
+      parseCliImpl: async () => ({ kind: "pager", options: {} }),
+      readStdinText: async () => patchText,
+      looksLikePatchInputImpl: () => true,
+      stdoutIsTTY: true,
+      env: { TERM: "xterm-256color" },
+      resolveRuntimeCliInputImpl: (input) => input,
+      resolveConfiguredCliInputImpl: (input) => createTestConfigResolution(input),
+      openControllingTerminalImpl: () => ({ stdin: {} as never, close: () => {} }),
+      loadAppBootstrapImpl: async (input) => createBootstrap(input),
+      usesPipedPatchInputImpl: () => true,
+      onInteractiveSurfaceCommitted: (surface) => {
+        surfaces.push(surface);
+      },
+    });
+
+    expect(plan.kind).toBe("app");
+    expect(surfaces).toEqual(["review"]);
+  });
+
+  test("keeps headless plans silent about interactive surfaces", async () => {
+    const patchText = "diff --git a/a.ts b/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
+    const surfaces: string[] = [];
+    const onInteractiveSurfaceCommitted = (surface: string) => {
+      surfaces.push(surface);
+    };
+
+    const staticDiff = await prepareStartupPlan(["bun", "hunk", "diff"], {
+      parseCliImpl: async () =>
+        ({ kind: "vcs", staged: false, options: {} }) as unknown as ParsedCliInput,
+      resolveRuntimeCliInputImpl: (input) => input,
+      resolveConfiguredCliInputImpl: (input) => createTestConfigResolution(input),
+      loadAppBootstrapImpl: async (input) => createBootstrap(input),
+      usesPipedPatchInputImpl: () => false,
+      stdoutIsTTY: false,
+      onInteractiveSurfaceCommitted,
+    });
+    const passthrough = await prepareStartupPlan(["bun", "hunk", "pager"], {
+      parseCliImpl: async () => ({ kind: "pager", options: {} }),
+      readStdinText: async () => patchText,
+      looksLikePatchInputImpl: () => true,
+      stdoutIsTTY: false,
+      env: { TERM: "xterm-256color" },
+      onInteractiveSurfaceCommitted,
+    });
+    const staticPager = await prepareStartupPlan(["bun", "hunk", "pager"], {
+      parseCliImpl: async () => ({ kind: "pager", options: {} }),
+      readStdinText: async () => patchText,
+      looksLikePatchInputImpl: () => true,
+      stdoutIsTTY: true,
+      env: { TERM: "xterm-256color" },
+      resolveRuntimeCliInputImpl: (input) => input,
+      resolveConfiguredCliInputImpl: (input) => createTestConfigResolution(input),
+      openControllingTerminalImpl: () => null,
+      onInteractiveSurfaceCommitted,
+    });
+    const help = await prepareStartupPlan(["bun", "hunk", "--help"], {
+      parseCliImpl: async () => ({ kind: "help", text: "usage\n" }),
+      stdoutIsTTY: true,
+      onInteractiveSurfaceCommitted,
+    });
+
+    expect(staticDiff.kind).toBe("static-diff");
+    expect(passthrough.kind).toBe("passthrough");
+    expect(staticPager.kind).toBe("static-diff-pager");
+    expect(help.kind).toBe("help");
+    expect(surfaces).toEqual([]);
+  });
+
+  test("announces the history surface only when the log will open interactively", async () => {
+    const cwd = createTestGitRepo();
+    const configHome = mkdtempSync(join(tmpdir(), "hunk-startup-history-config-"));
+    const env = { ...process.env, XDG_CONFIG_HOME: configHome };
+    const historyInput = {
+      kind: "history" as const,
+      color: "never" as const,
+      format: "compact" as const,
+      ascii: false,
+      static: false,
+      vcs: "git",
+      extensionsEnabled: false,
+      extensionPaths: [],
+    };
+    const surfaces: string[] = [];
+    const onInteractiveSurfaceCommitted = (surface: string) => {
+      surfaces.push(surface);
+    };
+    const plans: Array<Awaited<ReturnType<typeof prepareStartupPlan>>> = [];
+
+    try {
+      plans.push(
+        await prepareStartupPlan(["bun", "hunk", "log"], {
+          parseCliImpl: async () => historyInput,
+          cwd,
+          env,
+          stdinIsTTY: true,
+          stdoutIsTTY: true,
+          onInteractiveSurfaceCommitted,
+        }),
+      );
+      expect(plans[0]?.kind).toBe("history-interactive");
+      expect(surfaces).toEqual(["history"]);
+
+      plans.push(
+        await prepareStartupPlan(["bun", "hunk", "log", "--static"], {
+          parseCliImpl: async () => ({ ...historyInput, static: true }),
+          cwd,
+          env,
+          stdinIsTTY: true,
+          stdoutIsTTY: true,
+          onInteractiveSurfaceCommitted,
+        }),
+      );
+      expect(plans[1]?.kind).toBe("history-static");
+      expect(surfaces).toEqual(["history"]);
+    } finally {
+      for (const plan of plans) {
+        if (plan.kind === "history-interactive" || plan.kind === "history-static") {
+          await plan.bootstrap.source.close();
+          await plan.bootstrap.extensionSession.shutdown();
+        }
+      }
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(configHome, { recursive: true, force: true });
+    }
   });
 
   test("skips extension loading entirely when config disables it", async () => {

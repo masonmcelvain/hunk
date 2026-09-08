@@ -65,7 +65,7 @@ packages/hunk/src/main.tsx
      -> headless/history plan returned to main.tsx for dispatch, or
      -> app plan: app/extensionBootstrap.ts loads user extensions and reconciles root/config
         -> app/sessionBootstrap.ts selects VCS and loads one Changeset
-        -> main.tsx lazy-loads ui/runInteractiveApp.tsx
+        -> main.tsx loads ui/runInteractiveApp.tsx, started as soon as startup commits to a terminal
            -> HunkSessionHost routes history and review in one React root
            -> AppHost owns reload, extension adoption, and review publication ordering
            -> App owns review interaction and layout coordination
